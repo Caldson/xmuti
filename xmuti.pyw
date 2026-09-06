@@ -10,7 +10,7 @@ except:
 # ---------- TXTPro 风格浮动小窗（深色标题栏、可拖动、右上角X） ----------
 class Window(tk.Frame):
     def __init__(self, master, window_title="窗口", width=220, height=160, placex=100, placey=100, bg="#f0f0f0", **kw):
-        super().__init__(master, bd=2, relief="raised", bg=bg, **kw)
+        self.super().__init__(master, bd=2, relief="raised", bg=bg, **kw)
         self.place(x=placex, y=placey, width=width, height=height)
         self.width, self.height = width, height
         self.title_bar = tk.Frame(self, bg="#333", height=28)
