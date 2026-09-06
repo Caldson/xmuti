@@ -30,7 +30,7 @@ class XMutiReader:
         tk.Button(self.root, text="编辑文件", state="disabled", height=2, width=20).pack(side=tk.LEFT)
 
     def FileRead(self):
-        path = filedialog.askopenfilename(filetypes=[("XMuti 多格式文件", "*.xmu")])
+        path = filedialog.askopenfilename(filetypes=[("XMuti 多格式文件", "*.xmu"), ("XMuti（备份）多格式文件", "*.xmu.bak")])
         if not path:
             return
         self.FileType = None
@@ -77,7 +77,7 @@ class XMutiReader:
         """按指定图像版本解读文件：ftype=0x02/0x03/0x04。
         自动打开时 ftype=文件里声明的类型；两个“强制”按钮则是强行用V2/V3的色表解读文件。"""
         if not inppath:
-            inppath = filedialog.askopenfilename(filetypes=[("XMuti 多格式文件", "*.xmu")])
+            inppath = filedialog.askopenfilename(filetypes=[("XMuti 多格式文件", "*.xmu"), ("XMuti（备份）多格式文件", "*.xmu.bak")])
             if not inppath:
                 return
         with open(inppath, "rb") as f:
@@ -125,6 +125,6 @@ class XMutiReader:
 if __name__ == "__main__":
     r = tk.Tk()
     r.resizable(False, False)
-    r.title("XMuti Workspace 0.1.0v")
+    r.title("XMuti Workspace 0.1.1v")
     XMutiReader(r)
     r.mainloop()
