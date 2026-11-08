@@ -1,4 +1,4 @@
-import os, ctypes
+import os, ctypes, threading, queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 try:
@@ -63,6 +63,9 @@ class XMutiReader:
         self.folder_files = []
         self._build_top_frame()
         self._build_main_frame()
+        # 后台任务队列（安全：线程只算，进队，主线程用after轮询再建控件）
+        self.tasks = queue.Queue()
+        self.root.after(20, self._poll_tasks)
 
     # ---------- 顶部菜单栏 ----------
     def _build_top_frame(self):
@@ -114,7 +117,7 @@ class XMutiReader:
         path = filedialog.askopenfilename(filetypes=[("XMuti 多格式文件", "*.xmu"), ("XMuti（备份）多格式文件", "*.xmu.bak")])
         if not path:
             return
-        self._load_file(path, forced)
+        self._open_async(path, forced)
 
     def open_folder(self):
         path = filedialog.askdirectory(title="选择文件夹")
@@ -135,11 +138,15 @@ class XMutiReader:
         except Exception as e:
             messagebox.showerror("错误", f"读取文件夹失败：{e}")
 
-    def _load_file(self, path, forced=None):
+    def _open_async(self, path, forced=None):
+        # 后台线程读文件/解码/取像素，主线程建控件，避免卡界面
+        self.Thread(lambda: self._prepare_file(path, forced), self._on_file_prepared)
+
+    def _prepare_file(self, path, forced):
+        """后台线程：只做读取/解析，绝不触碰GUI。返回 (状态, 数据)。"""
         with open(path, "rb") as f:
             if f.read(5) != b"XMUTI":
-                messagebox.showerror("错误", "文件损坏或不是XMuti文件")
-                return
+                return ("error", "文件损坏或不是XMuti文件")
             f.read(1)
             self.FileType = f.read(1)[0]
         ftype = forced if forced is not None else self.FileType
@@ -149,29 +156,36 @@ class XMutiReader:
                 try:
                     content = f.read().decode("utf-8")
                 except UnicodeDecodeError:
-                    messagebox.showerror("错误", "文本解码失败（不是有效的UTF-8）")
-                    return
-            self._create_text_tab(path, content)
-        elif ftype in self.ColorMaps:
+                    return ("error", "文本解码失败（不是有效的UTF-8）")
+            return ("ok", {"path": path, "ftype": 0x01, "content": content})
+        if ftype in self.ColorMaps:
             with open(path, "rb") as f:
                 if f.read(5) != b"XMUTI":
-                    messagebox.showerror("错误", "文件损坏或不是XMuti文件")
-                    return
+                    return ("error", "文件损坏或不是XMuti文件")
                 f.read(1)
                 self.FileType = f.read(1)[0]
                 pixels = f.read()[9:]
             size = self._MatchSize(len(pixels), self.AllowedSizes[ftype])
             if size is None:
                 opts = "或".join(f"{s}x{s}" for s in self.AllowedSizes[ftype])
-                messagebox.showerror("错误", f"不支持的图像尺寸（此版本仅支持{opts}）")
-                return
-            self._create_image_tab(path, ftype, size, pixels)
-        elif ftype in range(0x06, 0x09 + 1):
-            messagebox.showerror("错误", "此类型是保留的类型。")
-        elif ftype == 0x00:
-            messagebox.showerror("错误", "此类型是未定义的保留的类型。")
+                return ("error", f"不支持的图像尺寸（此版本仅支持{opts}）")
+            return ("ok", {"path": path, "ftype": ftype, "size": size, "pixels": pixels})
+        if ftype in range(0x06, 0x09 + 1):
+            return ("error", "此类型是保留的类型。")
+        if ftype == 0x00:
+            return ("error", "此类型是未定义的保留的类型。")
+        return ("error", "此类型是未定义的类型。")
+
+    def _on_file_prepared(self, result):
+        """主线程：根据后台解析结果建标签页。"""
+        status, payload = result
+        if status == "error":
+            messagebox.showerror("错误", payload)
+            return
+        if payload["ftype"] == 0x01:
+            self._create_text_tab(payload["path"], payload["content"])
         else:
-            messagebox.showerror("错误", "此类型是未定义的类型。")
+            self._create_image_tab(payload["path"], payload["ftype"], payload["size"], payload["pixels"])
 
     # ---------- 文本标签（带行号栏，仿TXTPro） ----------
     def _create_text_tab(self, file_path, content):
@@ -239,20 +253,29 @@ class XMutiReader:
         else:
             lopt = dict(width=2, height=1, text="  ")
         colormap = self.ColorMaps[ftype]
-        unknown = set()
-        for i in range(size):
-            for j in range(size):
-                val = pixels[i * size + j]
-                color = colormap.get(val)
-                if color is None:
-                    unknown.add(val)
-                    color = "white"
-                tk.Label(inner, bg=color, fg=color, **lopt).grid(row=i, column=j)
         self.tabs_data[tab_frame] = {"file_path": path, "ftype": ftype, "size": size, "pixels": pixels, "editable": False}
-        self._update_window_title()
-        if unknown:
-            hexlist = ", ".join(f"0x{v:02X}" for v in sorted(unknown))
-            messagebox.showwarning("警告", f"图像中存在不支持的颜色（{hexlist}），已渲染为白色。")
+        unknown = set()
+        row = [0]
+        def build_row():
+            """分片渲染：每行一帧，避免一次生成过多Label卡住界面。"""
+            i = row[0]
+            if i < size:
+                base = i * size
+                for j in range(size):
+                    val = pixels[base + j]
+                    color = colormap.get(val)
+                    if color is None:
+                        unknown.add(val)
+                        color = "white"
+                    tk.Label(inner, bg=color, fg=color, **lopt).grid(row=i, column=j)
+                row[0] += 1
+                self.root.after(1, build_row)
+            else:
+                self._update_window_title()
+                if unknown:
+                    hexlist = ", ".join(f"0x{v:02X}" for v in sorted(unknown))
+                    messagebox.showwarning("警告", f"图像中存在不支持的颜色（{hexlist}），已渲染为白色。")
+        build_row()
 
     # ---------- 创建文件向导 ----------
     def create_file(self):
@@ -306,7 +329,7 @@ class XMutiReader:
                 with open(savepath, "wb") as f:
                     f.write(b"XMUTI\x00" + bytes([ftype]) + bytes(9) + bytes(size * size))
                 win.destroy()
-                self._load_file(savepath)
+                self._open_async(savepath)
             else:
                 savepath = filedialog.asksaveasfilename(title="保存新建的文本文件", defaultextension=".xmu",
                                                        filetypes=[("XMuti 多格式文件", "*.xmu")])
@@ -315,7 +338,7 @@ class XMutiReader:
                 with open(savepath, "wb") as f:
                     f.write(b"XMUTI\x00\x01")
                 win.destroy()
-                self._load_file(savepath)
+                self._open_async(savepath)
 
         tk.Button(win.content, text="创建并保存...", command=do_create).grid(row=3, column=0, columnspan=3, pady=12)
 
@@ -460,7 +483,30 @@ class XMutiReader:
         if not sel:
             return
         path = os.path.join(self.current_folder, self.folder_listbox.get(sel[0]))
-        self._load_file(path)
+        self._open_async(path)
+
+    # ---------- 后台线程（安全：线程只算，主线程建控件） ----------
+    def Thread(self, worker, on_done):
+        """在后台线程执行 worker（不碰GUI），完成后把结果交回主线程执行 on_done(result)。"""
+        def run():
+            try:
+                result = worker()
+            except Exception as e:
+                result = ("error", str(e))
+            self.tasks.put((on_done, result))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _poll_tasks(self):
+        try:
+            while True:
+                on_done, result = self.tasks.get_nowait()
+                try:
+                    on_done(result)
+                except Exception as e:
+                    messagebox.showerror("错误", f"任务处理出错：{e}")
+        except queue.Empty:
+            pass
+        self.root.after(20, self._poll_tasks)
 
     # ---------- 快捷键 ----------
     def bind_shortcuts(self):
